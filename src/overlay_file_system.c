@@ -1,4 +1,5 @@
 #include "overlay_file_system.h"
+#include "debug_log.h"
 #include "utils.h"
 
 #include <stdio.h>
@@ -51,9 +52,49 @@ static char* joinPath(const char* basePath, const char* normalizedPath) {
     return full;
 }
 
+
+static bool hasOggSuffix(const char* normalizedPath) {
+    if (normalizedPath == nullptr) return false;
+    size_t len = strlen(normalizedPath);
+    if (len < 4) return false;
+    const char* ext = normalizedPath + len - 4;
+    return (ext[0] == '.') &&
+           (ext[1] == 'o' || ext[1] == 'O') &&
+           (ext[2] == 'g' || ext[2] == 'G') &&
+           (ext[3] == 'g' || ext[3] == 'G');
+}
+
+static bool shouldUseRootBundle(const char* normalizedPath) {
+    if (normalizedPath == nullptr) return false;
+    // DELTARUNE keeps shared music in the root folder next to the launcher data.win,
+    // not inside chapterN_windows/. Only mus/* is forced root.
+    // Loose snd_*.ogg files are chapter-local and must resolve from the active chapter first.
+    return strncmp(normalizedPath, "mus/", 4) == 0;
+}
+
 static bool pathExists(const char* fullPath) {
     struct stat st;
     return stat(fullPath, &st) == 0;
+}
+
+static const char* rootBundlePath(OverlayFileSystem* ofs) {
+    const char* rootPath = getenv("BUTTERSCOTCH_ROOT_BUNDLE_DIR");
+    if (rootPath != nullptr && rootPath[0] != '\0') {
+        return rootPath;
+    }
+    return ofs->bundlePath;
+}
+
+// In-process game_change keeps the same FileSystem object, so let it switch
+// the read-only bundle root through an environment override. This preserves
+// normal save-path behavior while making file reads/streams resolve inside
+// chapterN_windows after a chapter switch.
+static const char* activeBundlePath(OverlayFileSystem* ofs) {
+    const char* overridePath = getenv("BUTTERSCOTCH_ACTIVE_BUNDLE_DIR");
+    if (overridePath != nullptr && overridePath[0] != '\0') {
+        return overridePath;
+    }
+    return ofs->bundlePath;
 }
 
 // Returns a heap-allocated full path for reads. Absolute inputs pass through as-is.
@@ -62,8 +103,33 @@ static char* resolveForRead(OverlayFileSystem* ofs, const char* relativePath) {
     char* normalized = normalizePath(relativePath);
     if (isAbsolute(normalized)) return normalized;
 
+    if (shouldUseRootBundle(normalized)) {
+        char* rootFull = joinPath(rootBundlePath(ofs), normalized);
+        BSC_debugLog("path", "resolvePath root relative=%s full=%s", normalized, rootFull);
+        free(normalized);
+        return rootFull;
+    }
+
+    // Loose chapter SFX such as snd_dtrans_lw.ogg live inside chapterN_windows/.
+    // Try the active chapter first, then fall back to the launcher/root folder.
+    if (hasOggSuffix(normalized)) {
+        char* chapterFull = joinPath(activeBundlePath(ofs), normalized);
+        if (pathExists(chapterFull)) {
+            BSC_debugLog("path", "resolvePath chapter-ogg relative=%s full=%s", normalized, chapterFull);
+            free(normalized);
+            return chapterFull;
+        }
+        free(chapterFull);
+        char* rootFull = joinPath(rootBundlePath(ofs), normalized);
+        BSC_debugLog("path", "resolvePath root-ogg-fallback relative=%s full=%s", normalized, rootFull);
+        free(normalized);
+        return rootFull;
+    }
+
     // Check if the path is already resolved
     if (strncmp(normalized, ofs->savePath, strlen(ofs->savePath)) == 0) return normalized;
+    const char* bundlePath = activeBundlePath(ofs);
+    if (strncmp(normalized, bundlePath, strlen(bundlePath)) == 0) return normalized;
     if (strncmp(normalized, ofs->bundlePath, strlen(ofs->bundlePath)) == 0) return normalized;
 
     char* saveFull = joinPath(ofs->savePath, normalized);
@@ -72,7 +138,7 @@ static char* resolveForRead(OverlayFileSystem* ofs, const char* relativePath) {
         return saveFull;
     }
     free(saveFull);
-    char* bundleFull = joinPath(ofs->bundlePath, normalized);
+    char* bundleFull = joinPath(activeBundlePath(ofs), normalized);
     free(normalized);
     return bundleFull;
 }
@@ -83,8 +149,17 @@ static char* resolveForWrite(OverlayFileSystem* ofs, const char* relativePath) {
     char* normalized = normalizePath(relativePath);
     if (isAbsolute(normalized)) return normalized;
 
+    if (shouldUseRootBundle(normalized)) {
+        char* rootFull = joinPath(rootBundlePath(ofs), normalized);
+        BSC_debugLog("path", "resolvePath root relative=%s full=%s", normalized, rootFull);
+        free(normalized);
+        return rootFull;
+    }
+
     // Check if the path is already resolved
     if (strncmp(normalized, ofs->savePath, strlen(ofs->savePath)) == 0) return normalized;
+    const char* bundlePath = activeBundlePath(ofs);
+    if (strncmp(normalized, bundlePath, strlen(bundlePath)) == 0) return normalized;
     if (strncmp(normalized, ofs->bundlePath, strlen(ofs->bundlePath)) == 0) return normalized;
 
     char* full = joinPath(ofs->savePath, normalized);
@@ -120,11 +195,39 @@ static char* overlayResolvePath(FileSystem* fs, const char* relativePath) {
     char* normalized = normalizePath(relativePath);
     if (isAbsolute(normalized)) return normalized;
 
+    // IMPORTANT for DELTARUNE chapter switching:
+    // resolvePath() is used by audio_create_stream(), not just generic file reads.
+    // mus/*.ogg stays in the root launcher folder, but loose SFX .ogg files are
+    // chapter-local and must resolve from the active chapter first.
+    if (shouldUseRootBundle(normalized)) {
+        char* rootFull = joinPath(rootBundlePath(ofs), normalized);
+        BSC_debugLog("path", "resolvePath root relative=%s full=%s", normalized, rootFull);
+        free(normalized);
+        return rootFull;
+    }
+
+    if (hasOggSuffix(normalized)) {
+        char* chapterFull = joinPath(activeBundlePath(ofs), normalized);
+        if (pathExists(chapterFull)) {
+            BSC_debugLog("path", "resolvePath chapter-ogg relative=%s full=%s", normalized, chapterFull);
+            free(normalized);
+            return chapterFull;
+        }
+        free(chapterFull);
+        char* rootFull = joinPath(rootBundlePath(ofs), normalized);
+        BSC_debugLog("path", "resolvePath root-ogg-fallback relative=%s full=%s", normalized, rootFull);
+        free(normalized);
+        return rootFull;
+    }
+
     // Check if the path is already resolved
+    const char* bundlePath = activeBundlePath(ofs);
     if (strncmp(normalized, ofs->savePath, strlen(ofs->savePath)) == 0) return normalized;
+    if (strncmp(normalized, bundlePath, strlen(bundlePath)) == 0) return normalized;
     if (strncmp(normalized, ofs->bundlePath, strlen(ofs->bundlePath)) == 0) return normalized;
 
-    char* full = joinPath(ofs->bundlePath, normalized);
+    char* full = joinPath(bundlePath, normalized);
+    BSC_debugLog("path", "resolvePath scoped relative=%s bundle=%s full=%s", normalized, bundlePath, full);
     free(normalized);
     return full;
 }

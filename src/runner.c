@@ -1,4 +1,5 @@
 #include "runner.h"
+#include "debug_log.h"
 #include "data_win.h"
 #include "instance.h"
 #include "renderer.h"
@@ -910,6 +911,17 @@ void Runner_drawPre(Runner* runner, int32_t windowW, int32_t windowH) {
     runner->renderer->vtable->endGUI(runner->renderer);
 }
 
+void Runner_drawGameChangeLoadingScreen(Runner* runner, int32_t windowW, int32_t windowH) {
+    if (runner == nullptr || runner->renderer == nullptr) return;
+    Renderer* renderer = runner->renderer;
+
+    // Only show a neutral black frame while the target data.win is still being
+    // parsed. The real dog loading screen lives inside each chapter data.win as
+    // obj_screen_loading, so once the chapter is loaded we let the chapter
+    // itself render that object instead of faking it from chapter select.
+    renderer->vtable->drawRectangle(renderer, 0.0f, 0.0f, (float) windowW, (float) windowH, 0x000000, 1.0f, false);
+}
+
 void Runner_drawPost(Runner* runner, int32_t windowW, int32_t windowH) {
     rebuildDrawableCacheIfDirty(runner);
     Drawable* drawables = runner->cachedDrawables;
@@ -1364,6 +1376,7 @@ static void initRoom(Runner* runner, int32_t roomIndex) {
     savedState->initialized = true;
 
     fprintf(stderr, "Runner: Room loaded: %s (room %d) with %d instances\n", room->name, roomIndex, (int) arrlen(runner->instances));
+    BSC_debugLog("room", "loaded name=%s index=%d instances=%d", room->name, roomIndex, (int) arrlen(runner->instances));
 }
 
 // Cleans up the runner state, used when freeing the Runner or when restarting the Runner
@@ -2556,6 +2569,7 @@ void Runner_handlePendingRoomChange(Runner* runner) {
         const char* newRoomName = runner->dataWin->room.rooms[newRoomIndex].name;
 
         fprintf(stderr, "Room changed: %s (room %d) -> %s (room %d)\n", oldRoomName, oldRoomIndex, newRoomName, newRoomIndex);
+        BSC_debugLog("room", "changed from=%s(%d) to=%s(%d)", oldRoomName, oldRoomIndex, newRoomName, newRoomIndex);
 
         // If the old room is persistent, save its instance and visual state
         if (oldRoom->persistent) {
@@ -3322,6 +3336,214 @@ char* Runner_dumpStateJson(Runner* runner) {
     char* result = JsonWriter_copyOutput(&w);
     JsonWriter_free(&w);
     return result;
+}
+
+
+static DataWinParserOptions Runner_gameChangeParserOptions(void) {
+    return (DataWinParserOptions) {
+        .parseGen8 = true,
+        .parseOptn = true,
+        .parseLang = true,
+        .parseExtn = false,
+        .parseSond = true,
+        .parseAgrp = true,
+        .parseSprt = true,
+        .parseBgnd = true,
+        .parsePath = true,
+        .parseScpt = true,
+        .parseGlob = true,
+        .parseShdr = true,
+        .parseFont = true,
+        .parseTmln = true,
+        .parseObjt = true,
+        .parseRoom = true,
+        .parseTpag = true,
+        .parseCode = true,
+        .parseVari = true,
+        .parseFunc = true,
+        .parseStrg = true,
+#ifdef PLATFORM_PS2
+        .parseTxtr = false,
+        .parseAudo = false,
+        .lazyLoadRooms = true,
+#else
+        .parseTxtr = true,
+        .parseAudo = true,
+        .lazyLoadRooms = false,
+#endif
+        .skipLoadingPreciseMasksForNonPreciseSprites = true,
+    };
+}
+
+static int32_t Runner_parseGameChangeChapter(const char* path, const char* params) {
+    const char* haystacks[2] = { path, params };
+    for (int h = 0; h < 2; h++) {
+        const char* s = haystacks[h];
+        if (s == nullptr) continue;
+        const char* p = strstr(s, "chapter");
+        while (p != nullptr) {
+            p += 7;
+            if (*p >= '0' && *p <= '9') return *p - '0';
+            p = strstr(p, "chapter");
+        }
+    }
+    return 0;
+}
+
+void Runner_requestGameChange(Runner* runner, const char* dataWinPath, const char* launchParameters) {
+    if (runner == nullptr || dataWinPath == nullptr) return;
+    free(runner->pendingGameChangePath);
+    free(runner->pendingGameChangeLaunchParameters);
+    runner->pendingGameChangePath = safeStrdup(dataWinPath);
+    runner->pendingGameChangeLaunchParameters = safeStrdup(launchParameters != nullptr ? launchParameters : "");
+    runner->pendingGameChangeTargetChapter = Runner_parseGameChangeChapter(dataWinPath, launchParameters);
+
+    // Do not force obj_screen_loading or a fake loading delay from the chapter select runner.
+    // Chapter data.win files own their own loading flow once loaded.
+    runner->pendingGameChangeLoadingFrames = 0;
+    runner->pendingGameChange = true;
+}
+
+static void Runner_rebindAudioForGameChange(Runner* runner, DataWin* newDataWin) {
+    if (runner == nullptr || runner->audioSystem == nullptr) return;
+    AudioSystem* audio = runner->audioSystem;
+
+    // In-process game_change swaps an entire GameMaker runtime without killing
+    // the process. Do NOT just rebind audioGroups: miniaudio keeps a live mixer
+    // thread and ma_sound data sources. If any old ma_sound/decoder/buffer
+    // survives the swap, the callback can read freed/corrupt frame counters.
+    // Let the backend do a real hard reset, then Runner_create() will init it
+    // against the target chapter data.win.
+    if (audio->vtable->resetForGameChange != nullptr) {
+        audio->vtable->resetForGameChange(audio, newDataWin, runner->fileSystem);
+        return;
+    }
+
+    // Fallback for backends that have not implemented the hard reset yet.
+    if (audio->vtable->stopAll != nullptr) {
+        audio->vtable->stopAll(audio);
+    }
+    if (arrlen(audio->audioGroups) > 1) {
+        for (int32_t i = 1; i < (int32_t) arrlen(audio->audioGroups); i++) {
+            DataWin_free(audio->audioGroups[i]);
+        }
+    }
+    arrfree(audio->audioGroups);
+    audio->audioGroups = nullptr;
+}
+
+static void Runner_freeReusableStateForGameChange(Runner* runner) {
+    cleanupState(runner);
+
+    if (runner->instancesByObject != nullptr) {
+        repeat(runner->dataWin->objt.count, i) arrfree(runner->instancesByObject[i]);
+        free(runner->instancesByObject);
+        runner->instancesByObject = nullptr;
+    }
+    if (runner->instancesByExactObject != nullptr) {
+        repeat(runner->dataWin->objt.count, i) arrfree(runner->instancesByExactObject[i]);
+        free(runner->instancesByExactObject);
+        runner->instancesByExactObject = nullptr;
+    }
+    if (runner->objectsWithAnyEventOfType != nullptr) {
+        repeat(OBJT_EVENT_TYPE_COUNT, t) arrfree(runner->objectsWithAnyEventOfType[t]);
+        free(runner->objectsWithAnyEventOfType);
+        runner->objectsWithAnyEventOfType = nullptr;
+    }
+    if (runner->flattenedCollisionEvents != nullptr) {
+        repeat(runner->dataWin->objt.count, i) free(runner->flattenedCollisionEvents[i].events);
+        free(runner->flattenedCollisionEvents);
+        runner->flattenedCollisionEvents = nullptr;
+    }
+    arrfree(runner->eventDispatchInstances);
+    runner->eventDispatchInstances = nullptr;
+    arrfree(runner->instanceSnapshots);
+    runner->instanceSnapshots = nullptr;
+    arrfree(runner->cachedDrawables);
+    runner->cachedDrawables = nullptr;
+    ResolvedEventTable_free(&runner->eventTable);
+    EventSlotMap_destroy(&runner->eventSlotMap);
+    shfree(runner->assetsByName);
+    runner->assetsByName = nullptr;
+    Instance_free(runner->globalScopeInstance);
+    runner->globalScopeInstance = nullptr;
+}
+
+bool Runner_performPendingGameChange(Runner* runner) {
+    if (runner == nullptr || !runner->pendingGameChange || runner->pendingGameChangePath == nullptr) return false;
+
+    if (runner->pendingGameChangeLoadingFrames > 0) {
+        runner->pendingGameChangeLoadingFrames--;
+        return false;
+    }
+
+    char* newPath = runner->pendingGameChangePath;
+    char* newParams = runner->pendingGameChangeLaunchParameters;
+    runner->pendingGameChangePath = nullptr;
+    runner->pendingGameChangeLaunchParameters = nullptr;
+    runner->pendingGameChange = false;
+
+    fprintf(stderr, "Runner: in-process game_change loading %s %s\n", newPath, newParams != nullptr ? newParams : "");
+    DataWin* newDataWin = DataWin_parse(newPath, Runner_gameChangeParserOptions());
+    if (newDataWin == nullptr) {
+        fprintf(stderr, "Runner: game_change failed to parse %s\n", newPath);
+        free(newPath);
+        free(newParams);
+        return false;
+    }
+
+    DataWin* oldDataWin = runner->dataWin;
+    VMContext* oldVm = runner->vmContext;
+    Renderer* renderer = runner->renderer;
+    FileSystem* fileSystem = runner->fileSystem;
+    AudioSystem* audioSystem = runner->audioSystem;
+    RunnerKeyboardState* keyboard = runner->keyboard;
+    RunnerGamepadState* gamepads = runner->gamepads;
+    void* nativeWindow = runner->nativeWindow;
+    void (*setWindowTitle)(void*, const char*) = runner->setWindowTitle;
+    bool (*getWindowSize)(void*, int32_t*, int32_t*) = runner->getWindowSize;
+    void (*setWindowSize)(void*, int32_t, int32_t) = runner->setWindowSize;
+    bool (*windowHasFocus)(void*) = runner->windowHasFocus;
+    bool debugMode = runner->debugMode;
+    YoYoOperatingSystem osType = runner->osType;
+
+    Runner_freeReusableStateForGameChange(runner);
+    runner->keyboard = nullptr;
+    runner->gamepads = nullptr;
+
+#ifdef PLATFORM_PS2
+    // PS2 keeps VMContext in scratchpad, so VM_create reuses the fixed address.
+    VMContext* newVm = VM_create(newDataWin);
+#else
+    // Desktop builds can allocate a fresh VM. The old VM is intentionally left alone
+    // because platform mains keep a local pointer for shutdown only.
+    VMContext* newVm = VM_create(newDataWin);
+#endif
+
+    Runner_rebindAudioForGameChange(runner, newDataWin);
+
+    Runner* fresh = Runner_create(newDataWin, newVm, renderer, fileSystem, audioSystem);
+    fresh->keyboard = keyboard;
+    fresh->gamepads = gamepads;
+    fresh->nativeWindow = nativeWindow;
+    fresh->setWindowTitle = setWindowTitle;
+    fresh->getWindowSize = getWindowSize;
+    fresh->setWindowSize = setWindowSize;
+    fresh->windowHasFocus = windowHasFocus;
+    fresh->debugMode = debugMode;
+    fresh->osType = osType;
+
+    memcpy(runner, fresh, sizeof(Runner));
+    free(fresh);
+    renderer->runner = runner;
+    newVm->runner = (struct Runner*) runner;
+
+    if (oldDataWin != nullptr) DataWin_free(oldDataWin);
+    Runner_initFirstRoom(runner);
+
+    free(newPath);
+    free(newParams);
+    return true;
 }
 
 void Runner_free(Runner* runner) {

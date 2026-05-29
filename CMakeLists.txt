@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.21)
 
+# Ninja was re-running CMake forever on some extracted trees.
+# Butterscotch does not need automatic CMake regeneration; clean rebuilds are explicit.
+set(CMAKE_SUPPRESS_REGENERATION TRUE)
+
 if(PLATFORM STREQUAL "ps3")
 set(CMAKE_TOOLCHAIN_FILE ${CMAKE_SOURCE_DIR}/cmake/ppu.cmake)
 endif()
@@ -12,6 +16,11 @@ add_compile_options(-Wall -Wextra)
 
 set(PLATFORM "" CACHE STRING "Platform backend")
 set(AUDIO_BACKEND "" CACHE STRING "Audio backend")
+option(ENABLE_FFMPEG_VIDEO "Enable FFmpeg-backed video_open/video_draw on desktop platforms" ON)
+option(ENABLE_PS2_LIBMPEG_VIDEO "Enable PS2SDK libmpeg-compatible video path on PS2; video_open maps .mp4 to .ps2.mpg" ON)
+
+set(BUTTERSCOTCH_GAME_CHANGE_MODE "inprocess" CACHE STRING "game_change implementation: inprocess or deltarunner")
+set_property(CACHE BUTTERSCOTCH_GAME_CHANGE_MODE PROPERTY STRINGS inprocess deltarunner)
 
 # Build metadata
 set(BUTTERSCOTCH_COMMIT_HASH "unknown" CACHE STRING "Git commit hash")
@@ -20,6 +29,16 @@ add_compile_definitions(
     BUTTERSCOTCH_COMMIT_HASH="${BUTTERSCOTCH_COMMIT_HASH}"
     BUTTERSCOTCH_COMMIT_DATE="${BUTTERSCOTCH_COMMIT_DATE}"
 )
+
+if(BUTTERSCOTCH_GAME_CHANGE_MODE STREQUAL "deltarunner")
+    add_compile_definitions(BUTTERSCOTCH_GAME_CHANGE_DELTARUNNER=1)
+    message(STATUS "game_change mode: deltarunner/spawn")
+elseif(BUTTERSCOTCH_GAME_CHANGE_MODE STREQUAL "inprocess")
+    add_compile_definitions(BUTTERSCOTCH_GAME_CHANGE_INPROCESS=1)
+    message(STATUS "game_change mode: inprocess")
+else()
+    message(FATAL_ERROR "Invalid BUTTERSCOTCH_GAME_CHANGE_MODE. Use inprocess or deltarunner")
+endif()
 
 if(PLATFORM STREQUAL "")
     message(FATAL_ERROR "PLATFORM is not set! Use -DPLATFORM=glfw (or another supported platform).")
@@ -123,6 +142,24 @@ elseif(AUDIO_BACKEND STREQUAL "web")
 elseif(AUDIO_BACKEND STREQUAL "ps2")
     target_include_directories(butterscotch PUBLIC src/audio/ps2)
     add_compile_definitions(USE_PS2_AUDIO)
+endif()
+
+
+# Optional desktop FFmpeg video backend. If not found, video builtins use a safe fallback that finishes instead of hanging.
+if(ENABLE_FFMPEG_VIDEO AND (PLATFORM STREQUAL "glfw" OR PLATFORM STREQUAL "sdl"))
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFMPEG QUIET libavformat libavcodec libavutil libswscale)
+        if(FFMPEG_FOUND)
+            target_compile_definitions(butterscotch PRIVATE USE_FFMPEG_VIDEO=1)
+            target_include_directories(butterscotch PRIVATE ${FFMPEG_INCLUDE_DIRS})
+            target_link_directories(butterscotch PRIVATE ${FFMPEG_LIBRARY_DIRS})
+            target_link_libraries(butterscotch ${FFMPEG_LIBRARIES})
+            message(STATUS "FFmpeg video backend enabled")
+        else()
+            message(WARNING "FFmpeg development packages not found; video builtins will use portable fallback")
+        endif()
+    endif()
 endif()
 
 # stb_ds
@@ -441,7 +478,12 @@ elseif(PLATFORM STREQUAL "ps2")
         # Compiling on the Docker container
         target_include_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/include $ENV{PS2SDK}/common/include $ENV{PS2DEV}/ee/include $ENV{GSKIT}/include)
         target_link_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/lib $ENV{GSKIT}/lib)
-        target_link_libraries(${AUDIO_LIBRARIES} butterscotch gskit dmakit audsrv pad mc kbd patches kernel c m)
+        if(ENABLE_PS2_LIBMPEG_VIDEO)
+            target_compile_definitions(butterscotch PRIVATE USE_PS2_LIBMPEG_VIDEO=1)
+            target_link_libraries(${AUDIO_LIBRARIES} butterscotch gskit dmakit audsrv mpeg pad mc kbd patches kernel c m)
+        else()
+            target_link_libraries(${AUDIO_LIBRARIES} butterscotch gskit dmakit audsrv pad mc kbd patches kernel c m)
+        endif()
 
         # Embed ps2sdk IRX modules (freesio2, freepad) as C arrays via bin2c
         # This avoids loading from rom0: which has compatibility issues between fat/slim PS2

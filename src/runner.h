@@ -52,6 +52,7 @@
 #define OTHER_END_OF_PATH    8
 #define OTHER_NO_MORE_HEALTH 9
 #define OTHER_USER0          10
+#define OTHER_ASYNC_VIDEO    70
 #define OTHER_ASYNC_SYSTEM   75
 
 #define MAX_VIEWS 8
@@ -470,6 +471,13 @@ struct Runner {
 
     // GameMaker surface "stack".
     int32_t surfaceStack[MAX_SURFACES];
+
+    // In-process game_change support. Set by builtin_game_change, consumed by Runner_performPendingGameChange.
+    bool pendingGameChange;
+    char* pendingGameChangePath;
+    char* pendingGameChangeLaunchParameters;
+    int32_t pendingGameChangeLoadingFrames;
+    int32_t pendingGameChangeTargetChapter;
 };
 
 const char* Runner_getEventName(int32_t eventType, int32_t eventSubtype);
@@ -478,6 +486,9 @@ Runner* Runner_create(DataWin* dataWin, VMContext* vm, Renderer* renderer, FileS
 void Runner_initFirstRoom(Runner* runner);
 void Runner_step(Runner* runner);
 void Runner_handlePendingRoomChange(Runner* runner);
+void Runner_requestGameChange(Runner* runner, const char* dataWinPath, const char* launchParameters);
+bool Runner_performPendingGameChange(Runner* runner);
+void Runner_drawGameChangeLoadingScreen(Runner* runner, int32_t windowW, int32_t windowH);
 void Runner_executeEvent(Runner* runner, Instance* instance, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventFromObject(Runner* runner, Instance* instance, int32_t startObjectIndex, int32_t eventType, int32_t eventSubtype);
 void Runner_executeEventForAll(Runner* runner, int32_t eventType, int32_t eventSubtype);

@@ -1091,6 +1091,9 @@ int main(int argc, char* argv[]) {
     }
     setenv("BUTTERSCOTCH_ARGV0", argv[0], 1);
     setenv("BUTTERSCOTCH_DATA_WIN_DIR", dataWinDir, 1);
+    if (getenv("BUTTERSCOTCH_ROOT_BUNDLE_DIR") == nullptr) {
+        setenv("BUTTERSCOTCH_ROOT_BUNDLE_DIR", dataWinDir, 1);
+    }
 
     const char* savePath = args.saveFolder != nullptr ? args.saveFolder : dataWinDir;
     OverlayFileSystem* overlayFs = OverlayFileSystem_create(dataWinDir, savePath);
@@ -1437,6 +1440,7 @@ int main(int argc, char* argv[]) {
             
             // Run one game step (Begin Step, Keyboard, Alarms, Step, End Step, room transitions)
             Runner_step(runner);
+            Runner_performPendingGameChange(runner);
 
             if (args.profilerFramesBetween > 0 && runner->frameCount > 0 && runner->frameCount % args.profilerFramesBetween == 0) {
                 char* profilerReport = Profiler_createReport(vm->profiler, 20, args.profilerFramesBetween);

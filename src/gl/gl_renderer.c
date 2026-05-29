@@ -1360,6 +1360,27 @@ static bool glSurfaceGetPixels(Renderer* renderer, int32_t surfaceId, uint8_t* o
     return GLCommon_surfaceGetPixels(gl->surfaces, gl->surfaceWidth, gl->surfaceHeight, gl->surfaceCount, surfaceId, outRGBA);
 }
 
+static bool glUpdateSurfaceRGBA(Renderer* renderer, int32_t surfaceId, const uint8_t* rgba, int32_t width, int32_t height) {
+    GLRenderer* gl = (GLRenderer*) renderer;
+    if (rgba == nullptr || width <= 0 || height <= 0) return false;
+    if (surfaceId < 0 || (uint32_t)surfaceId >= gl->surfaceCount) return false;
+    if (gl->surfaceTexture[surfaceId] == 0) return false;
+
+    flushBatch(gl);
+
+    if (gl->surfaceWidth[surfaceId] != width || gl->surfaceHeight[surfaceId] != height) {
+        if (renderer->vtable->surfaceResize) renderer->vtable->surfaceResize(renderer, surfaceId, width, height);
+    }
+
+    GLint oldTex = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTex);
+    glBindTexture(GL_TEXTURE_2D, gl->surfaceTexture[surfaceId]);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)oldTex);
+    return true;
+}
+
 static bool glSetRenderTarget(Renderer* renderer, int32_t surfaceId) {
     GLRenderer* gl = (GLRenderer*) renderer;
 
@@ -1703,6 +1724,7 @@ static RendererVtable glVtable = {
     .ensureApplicationSurface = glEnsureApplicationSurface,
     .surfaceCopy = glSurfaceCopy,
     .surfaceGetPixels = glSurfaceGetPixels,
+    .updateSurfaceRGBA = glUpdateSurfaceRGBA,
     .getSurfaceWidth = glGetSurfaceWidth,
     .getSurfaceHeight = glGetSurfaceHeight,
     .drawSurface = glDrawSurface,

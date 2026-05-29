@@ -2941,6 +2941,49 @@ static void gsSurfaceCopy(Renderer* renderer, int32_t destSurfaceID, int32_t des
 }
 static bool gsSurfaceGetPixels(MAYBE_UNUSED Renderer* renderer, MAYBE_UNUSED int32_t surfaceID, MAYBE_UNUSED uint8_t* outRGBA) { return false; }
 
+static inline uint16_t ps2RgbaToCt16(const uint8_t* p) {
+    // GS CT16 is ARGB1555-ish. gsKit uses 0x8000 as the visible alpha bit.
+    uint8_t r = p[0] >> 3;
+    uint8_t g = p[1] >> 3;
+    uint8_t b = p[2] >> 3;
+    uint8_t a = p[3] >= 8 ? 1 : 0;
+    return (uint16_t)((a << 15) | (r << 10) | (g << 5) | b);
+}
+
+static bool gsUpdateSurfaceRGBA(Renderer* renderer, int32_t surfaceID, const uint8_t* rgba, int32_t width, int32_t height) {
+    GsRenderer* gs = (GsRenderer*) renderer;
+    if (rgba == nullptr || width <= 0 || height <= 0) return false;
+    if (!gsSurfaceIsLive(gs, surfaceID)) return false;
+    Surface* s = &gs->surfaces[surfaceID];
+    if (s->chunkCount == 0) return false;
+
+    // PS2 surfaces are fixed-size. If the video frame changes size, create a correctly sized
+    // surface from video_open/video_draw before calling this, rather than resizing here.
+    int32_t copyW = width < (int32_t)s->width ? width : (int32_t)s->width;
+    int32_t copyH = height < (int32_t)s->height ? height : (int32_t)s->height;
+    if (copyW <= 0 || copyH <= 0) return false;
+
+    uint32_t paddedWidth = (uint32_t)s->tbw * 64u;
+    size_t bytes = (size_t)paddedWidth * (size_t)s->height * 2u;
+    uint16_t* ct16 = (uint16_t*) safeMemalign(128, bytes);
+    if (ct16 == nullptr) return false;
+    memset(ct16, 0, bytes);
+
+    for (int y = 0; y < copyH; y++) {
+        uint16_t* dst = ct16 + (size_t)y * paddedWidth;
+        const uint8_t* src = rgba + (size_t)y * (size_t)width * 4u;
+        for (int x = 0; x < copyW; x++) {
+            dst[x] = ps2RgbaToCt16(src + (size_t)x * 4u);
+        }
+    }
+
+    uint32_t vramAddr = gs->textureVramBase + (uint32_t)s->firstChunk * VRAM_CHUNK_SIZE;
+    gsKit_texture_send((u32*)ct16, paddedWidth, (uint32_t)s->height, vramAddr, GS_PSM_CT16, s->tbw, GS_CLUT_TEXTURE);
+    dmaKit_wait_fast();
+    free(ct16);
+    return true;
+}
+
 // ===[ Vtable ]===
 
 static RendererVtable gsVtable = {
@@ -2989,6 +3032,7 @@ static RendererVtable gsVtable = {
     .surfaceFree = gsSurfaceFree,
     .surfaceCopy = gsSurfaceCopy,
     .surfaceGetPixels = gsSurfaceGetPixels,
+    .updateSurfaceRGBA = gsUpdateSurfaceRGBA,
 };
 
 // ===[ Public API ]===

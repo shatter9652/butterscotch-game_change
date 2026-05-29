@@ -1,6 +1,7 @@
 #include "noop_audio_system.h"
 
 #include <stdlib.h>
+#include "stb_ds.h"
 
 static void noopInit(MAYBE_UNUSED AudioSystem* audio, MAYBE_UNUSED DataWin* dataWin, MAYBE_UNUSED FileSystem* fileSystem) {}
 
@@ -71,6 +72,17 @@ static bool noopDestroyStream(MAYBE_UNUSED AudioSystem* audio, MAYBE_UNUSED int3
     return false;
 }
 
+static void noopResetForGameChange(AudioSystem* audio, MAYBE_UNUSED DataWin* newDataWin, MAYBE_UNUSED FileSystem* fileSystem) {
+    if (audio == nullptr) return;
+    if (arrlen(audio->audioGroups) > 1) {
+        for (int32_t i = 1; i < (int32_t) arrlen(audio->audioGroups); i++) {
+            DataWin_free(audio->audioGroups[i]);
+        }
+    }
+    arrfree(audio->audioGroups);
+    audio->audioGroups = nullptr;
+}
+
 static AudioSystemVtable noopVtable = {
     .init = noopInit,
     .destroy = noopDestroy,
@@ -96,6 +108,7 @@ static AudioSystemVtable noopVtable = {
     .groupIsLoaded = noopGroupIsLoaded,
     .createStream = noopCreateStream,
     .destroyStream = noopDestroyStream,
+    .resetForGameChange = noopResetForGameChange,
 };
 
 NoopAudioSystem* NoopAudioSystem_create(void) {

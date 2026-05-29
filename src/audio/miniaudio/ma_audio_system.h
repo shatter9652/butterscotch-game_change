@@ -17,6 +17,9 @@ typedef struct {
     ma_sound maSound; // miniaudio sound object
     ma_decoder decoder; // decoder for memory-based audio
     bool ownsDecoder; // true if decoder needs uninit
+    ma_audio_buffer audioBuffer; // fully-decoded external stream buffer
+    void* pcmData; // owned PCM data for audioBuffer
+    bool ownsAudioBuffer; // true if audioBuffer/pcmData need cleanup
     float targetGain;
     float currentGain;
     float fadeTimeRemaining;
@@ -33,10 +36,16 @@ typedef struct {
 typedef struct {
     AudioSystem base;
     ma_engine engine;
+    bool engineInitialized;
     SoundInstance instances[MAX_SOUND_INSTANCES];
     int32_t nextInstanceCounter;
     FileSystem* fileSystem;
     AudioStreamEntry streams[MAX_AUDIO_STREAMS];
+    // After in-process game_change, some DELTARUNE chapter scripts create the
+    // music stream but fail to reach the play call under this runner. Let the
+    // first music streams auto-start, and de-dupe later audio_play_sound().
+    bool autoStartMusicStreamsAfterGameChange;
+    bool afterGameChange;
 } MaAudioSystem;
 
 MaAudioSystem* MaAudioSystem_create(void);

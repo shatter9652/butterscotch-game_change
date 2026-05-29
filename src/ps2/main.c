@@ -636,6 +636,7 @@ int main(int argc, char* argv[]) {
 
         u64 stepStartTime = GetTimerSystemTime();
         Runner_step(runner);
+        Runner_performPendingGameChange(runner);
         u64 stepEndTime = GetTimerSystemTime();
 
         gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));

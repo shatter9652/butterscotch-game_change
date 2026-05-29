@@ -1596,6 +1596,26 @@ static bool glLegacySurfaceGetPixels(Renderer* renderer, int32_t surfaceId, uint
     return GLCommon_surfaceGetPixels(gl->surfaces, gl->surfaceWidth, gl->surfaceHeight, gl->surfaceCount, surfaceId, outRGBA);
 }
 
+static bool glLegacyUpdateSurfaceRGBA(Renderer* renderer, int32_t surfaceId, const uint8_t* rgba, int32_t width, int32_t height) {
+    GLLegacyRenderer* gl = (GLLegacyRenderer*) renderer;
+    if (rgba == nullptr || width <= 0 || height <= 0) return false;
+    if (surfaceId < 0 || (uint32_t)surfaceId >= gl->surfaceCount) return false;
+    if (gl->surfaceTexture[surfaceId] == 0) return false;
+
+    if (gl->surfaceWidth[surfaceId] != width || gl->surfaceHeight[surfaceId] != height) {
+        renderer->vtable->surfaceResize(renderer, surfaceId, width, height);
+    }
+
+    GLint oldTex = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &oldTex);
+    glBindTexture(GL_TEXTURE_2D, gl->surfaceTexture[surfaceId]);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)oldTex);
+    return true;
+}
+
+
 
 // ===[ Vtable ]===
 
@@ -1644,6 +1664,7 @@ static RendererVtable glVtable = {
     .surfaceFree = glLegacySurfaceFree,
     .surfaceCopy = glLegacySurfaceCopy,
     .surfaceGetPixels = glLegacySurfaceGetPixels,
+    .updateSurfaceRGBA = glLegacyUpdateSurfaceRGBA,
 };
 
 // ===[ Public API ]===

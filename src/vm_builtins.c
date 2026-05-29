@@ -30,6 +30,7 @@
 #include "collision.h"
 #include "ini.h"
 #include "audio_system.h"
+#include "video_system.h"
 #include "file_system.h"
 #include "md5.h"
 #include "sha1.h"
@@ -3368,8 +3369,22 @@ static char* joinPath2(const char* a, const char* b) {
     return out;
 }
 
-// DELTARUNNER-ish Linux game_change(working_directory, launch_parameters):
-// save window state in env, launch this runner against <working_directory>/data.win, then quit this process.
+static char* withTrailingSlash2(const char* path) {
+    if (path == nullptr || path[0] == '\0') return safeStrdup("./");
+    size_t len = strlen(path);
+    if (path[len - 1] == '/' || path[len - 1] == '\\') return safeStrdup(path);
+    char* out = (char*) safeMalloc(len + 2);
+    memcpy(out, path, len);
+    out[len] = '/';
+    out[len + 1] = '\0';
+    return out;
+}
+
+// game_change(working_directory, launch_parameters)
+//
+// Build modes:
+//   -DBUTTERSCOTCH_GAME_CHANGE_MODE=inprocess   : hot-swap data.win in the same process/window.
+//   -DBUTTERSCOTCH_GAME_CHANGE_MODE=deltarunner : spawn the runner again, DELTARUNNER-style, then exit.
 static RValue builtin_game_change(VMContext* ctx, RValue* args, int32_t argCount) {
     if (argCount < 1) return RValue_makeUndefined();
 
@@ -3378,66 +3393,143 @@ static RValue builtin_game_change(VMContext* ctx, RValue* args, int32_t argCount
     if (workingDirectory == nullptr) workingDirectory = safeStrdup("");
     if (launchParameters == nullptr) launchParameters = safeStrdup("");
 
-    Runner* runner = ctx != nullptr ? ctx->runner : nullptr;
-    int32_t winW = 0;
-    int32_t winH = 0;
-    if (runner != nullptr && runner->getWindowSize != nullptr) {
-        runner->getWindowSize(runner->nativeWindow, &winW, &winH);
+    const char* baseDir = getenv("BUTTERSCOTCH_ROOT_BUNDLE_DIR");
+    if (baseDir == nullptr || baseDir[0] == '\0') {
+        baseDir = getenv("BUTTERSCOTCH_DATA_WIN_DIR");
     }
-    if (winW <= 0) winW = (int32_t) ctx->dataWin->gen8.defaultWindowWidth;
-    if (winH <= 0) winH = (int32_t) ctx->dataWin->gen8.defaultWindowHeight;
+    if (baseDir == nullptr || baseDir[0] == '\0') {
+        baseDir = ".";
+    }
 
-    char buf[64];
-    snprintf(buf, sizeof(buf), "%d", 0);
-    setenv("GAMEMAKER_INITIAL_WINDOW_FS", "0", 1);
-    setenv("GAMEMAKER_INITIAL_WINDOW_FS_BORDERLESS", "0", 1);
-    setenv("GAMEMAKER_INITIAL_WINDOW_X", "0", 1);
-    setenv("GAMEMAKER_INITIAL_WINDOW_Y", "0", 1);
-    snprintf(buf, sizeof(buf), "%d", winW);
-    setenv("GAMEMAKER_INITIAL_WINDOW_WIDTH", buf, 1);
-    snprintf(buf, sizeof(buf), "%d", winH);
-    setenv("GAMEMAKER_INITIAL_WINDOW_HEIGHT", buf, 1);
-
-    const char* baseDir = getenv("BUTTERSCOTCH_DATA_WIN_DIR");
-    char* chapterDir = joinPath2(baseDir != nullptr ? baseDir : ".", workingDirectory);
+    char* chapterDir = joinPath2(baseDir, workingDirectory);
     char* childDataWin = joinPath2(chapterDir, "data.win");
 
-    char exePath[4096];
-    ssize_t exeLen = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
-    if (exeLen > 0) {
-        exePath[exeLen] = '\0';
-    } else {
-        const char* fallback = getenv("BUTTERSCOTCH_ARGV0");
-        snprintf(exePath, sizeof(exePath), "%s", fallback != nullptr ? fallback : "./butterscotch");
-    }
+    // Keep DELTARUNNER's visible launch-parameter behavior available to GML.
+    setenv("BUTTERSCOTCH_PARAMETER_COUNT", "5", 1);
+    setenv("BUTTERSCOTCH_PARAMETER_1", "-gamedir", 1);
+    setenv("BUTTERSCOTCH_PARAMETER_2", workingDirectory, 1);
+    setenv("BUTTERSCOTCH_PARAMETER_3", "-game", 1);
+    setenv("BUTTERSCOTCH_PARAMETER_4", "data.win", 1);
+    setenv("BUTTERSCOTCH_PARAMETER_5", launchParameters, 1);
 
-    char* qExe = shellQuote(exePath);
+#if defined(BUTTERSCOTCH_GAME_CHANGE_DELTARUNNER)
+    // DELTARUNNER-like mode: create a new runner process, pass -gamedir, then
+    // terminate this one. This is the closest behavior to the Linux runner you
+    // described and is useful for PS2 experiments where a full runtime restart
+    // may be easier than hot-swapping every subsystem.
+    const char* argv0 = getenv("BUTTERSCOTCH_ARGV0");
+    if (argv0 == nullptr || argv0[0] == '\0') argv0 = "./butterscotch";
+
+    setenv("BUTTERSCOTCH_ROOT_BUNDLE_DIR", baseDir, 1);
+
+    char* qExe = shellQuote(argv0);
     char* qData = shellQuote(childDataWin);
     char* qGameDir = shellQuote(workingDirectory);
 
     size_t cmdLen = strlen(qExe) + strlen(qData) + strlen(qGameDir) + strlen(launchParameters) + 64;
-    char* cmd = (char*) safeMalloc(cmdLen);
-    snprintf(cmd, cmdLen, "%s %s -gamedir %s %s &", qExe, qData, qGameDir, launchParameters);
+    char* command = (char*) safeMalloc(cmdLen);
+    snprintf(command, cmdLen, "%s %s -gamedir %s %s", qExe, qData, qGameDir, launchParameters);
 
-    fprintf(stderr, "VM: game_change launching: %s\n", cmd);
-    int rc = system(cmd);
-    if (rc == -1) {
-        fprintf(stderr, "VM: game_change system() failed: %s\n", strerror(errno));
-    }
+    fprintf(stderr, "VM: game_change deltarunner launch: %s\n", command);
+    int rc = system(command);
+    fprintf(stderr, "VM: game_change child returned rc=%d; exiting original runner\n", rc);
 
+    free(command);
     free(qExe);
     free(qData);
     free(qGameDir);
-    free(cmd);
     free(childDataWin);
     free(chapterDir);
     free(workingDirectory);
     free(launchParameters);
-
     exit(0);
+    return RValue_makeUndefined();
+#else
+    // In-process mode: keep the same process/window and hot-swap the entire
+    // GameMaker runtime. This is the experimental replacement we keep fixing.
+    char* activeBundleDir = withTrailingSlash2(chapterDir);
+    setenv("BUTTERSCOTCH_ACTIVE_BUNDLE_DIR", activeBundleDir, 1);
+    setenv("BUTTERSCOTCH_ROOT_BUNDLE_DIR", baseDir, 1);
+
+    fprintf(stderr, "VM: game_change queued in-process load: %s -gamedir %s %s\n", childDataWin, workingDirectory, launchParameters);
+    if (ctx != nullptr && ctx->runner != nullptr) {
+        Runner_requestGameChange((Runner*) ctx->runner, childDataWin, launchParameters);
+    }
+
+    free(activeBundleDir);
+    free(childDataWin);
+    free(chapterDir);
+    free(workingDirectory);
+    free(launchParameters);
+    return RValue_makeUndefined();
+#endif
+}
+
+
+
+static RValue builtin_string_split(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    char* src = (argCount >= 1) ? RValue_toString(args[0]) : safeStrdup("");
+    char* delim = (argCount >= 2) ? RValue_toString(args[1]) : safeStrdup("");
+    bool removeEmpty = (argCount >= 3) ? RValue_toBool(args[2]) : false;
+    int32_t maxSplits = (argCount >= 4) ? RValue_toInt32(args[3]) : -1;
+    if (src == nullptr) src = safeStrdup("");
+    if (delim == nullptr) delim = safeStrdup("");
+
+    GMLArray* out = GMLArray_create(1);
+    int32_t count = 0;
+    char* cursor = src;
+    size_t dlen = strlen(delim);
+    while (true) {
+        char* hit = (dlen == 0 || (maxSplits >= 0 && count >= maxSplits)) ? nullptr : strstr(cursor, delim);
+        size_t partLen = hit != nullptr ? (size_t)(hit - cursor) : strlen(cursor);
+        if (!removeEmpty || partLen > 0) {
+            GMLArray_growTo(out, count + 1);
+            char* part = (char*) safeMalloc(partLen + 1);
+            memcpy(part, cursor, partLen);
+            part[partLen] = '\0';
+            *GMLArray_slot(out, count++) = RValue_makeOwnedString(part);
+        }
+        if (hit == nullptr) break;
+        cursor = hit + dlen;
+    }
+    free(src);
+    free(delim);
+    return RValue_makeArray(out);
+}
+
+static RValue builtin_audio_set_master_gain(VMContext* ctx, RValue* args, int32_t argCount) {
+    // GameMaker has used two calling styles here:
+    //   audio_master_gain(gain)                  // old/global helper
+    //   audio_set_master_gain(listener, gain[, time])
+    // DELTARUNE chapters call the listener form. The old Butterscotch stub
+    // treated args[0] as the gain, so audio_set_master_gain(0, 1, ...) muted
+    // the whole engine to 0. Chapter select still had audio because it does
+    // not hit the same init path. Ignore listener/time and use args[1] when
+    // present.
+    if (ctx != nullptr && ctx->runner != nullptr && ctx->runner->audioSystem != nullptr && ctx->runner->audioSystem->vtable->setMasterGain != nullptr) {
+        float gain = 1.0f;
+        if (argCount >= 2) {
+            gain = (float) RValue_toReal(args[1]);
+        } else if (argCount >= 1) {
+            gain = (float) RValue_toReal(args[0]);
+        }
+        ctx->runner->audioSystem->vtable->setMasterGain(ctx->runner->audioSystem, gain);
+    }
     return RValue_makeUndefined();
 }
 
+static RValue builtin_texturegroup_get_textures(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeArray(GMLArray_create(0));
+}
+
+static RValue builtin_doNothing(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static int32_t bs_nextFakeResourceId = 1000000;
+static RValue builtin_fake_resource_id(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal((double) bs_nextFakeResourceId++);
+}
 
 static RValue builtin_parameter_count(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
     const char* count = getenv("BUTTERSCOTCH_PARAMETER_COUNT");
@@ -4898,6 +4990,27 @@ static RValue builtin_audio_group_is_loaded(VMContext* ctx, RValue* args, MAYBE_
     return RValue_makeBool(loaded);
 }
 
+static RValue builtin_audio_group_set_gain(VMContext* ctx, RValue* args, int32_t argCount) {
+    // GMS2: audio_group_set_gain(group, gain, time)
+    // Butterscotch currently has global sound gain only. DELTARUNE uses this
+    // as a mixer-group fade; apply it to master gain as a safe compatibility
+    // fallback so it does not become an unknown function or mute accidentally.
+    AudioSystem* audio = getAudioSystem(ctx);
+    if (audio == nullptr) return RValue_makeUndefined();
+    if (argCount >= 2 && audio->vtable->setMasterGain != nullptr) {
+        float gain = (float)RValue_toReal(args[1]);
+        if (gain < 0.0f) gain = 0.0f;
+        if (gain > 1.0f) gain = 1.0f;
+        audio->vtable->setMasterGain(audio, gain);
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_audio_group_get_gain(VMContext* ctx, RValue* args, int32_t argCount) {
+    (void)ctx; (void)args; (void)argCount;
+    return RValue_makeReal(1.0);
+}
+
 static RValue builtin_audio_play_music(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
     if (ctx->dataWin->gen8.wadVersion >= 14) {
         fprintf(stderr, "VM: [%s] audio_play_music is no-op in WAD version 14+!\n", ctx->currentCodeName);
@@ -6029,6 +6142,51 @@ static RValue builtin_instance_find(VMContext* ctx, RValue* args, int32_t argCou
     }
     Runner_popInstanceSnapshot(runner, snapBase);
     return RValue_makeReal((GMLReal) resultId);
+}
+
+
+// GameMaker 2022+ internal helper used by compiled method/with access in some DELTARUNE
+// chapter loading objects. The VM sees it as a normal function named "@@GetInstance@@".
+// Returning undefined makes follow-up reads fall back to object index 0 and freezes
+// obj_screen_loading, so emulate the runner lookup here.
+static RValue builtin_internal_get_instance(VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeReal(INSTANCE_NOONE);
+
+    Runner* runner = ctx->runner;
+    int32_t target = RValue_toInt32(args[0]);
+
+    // Existing runtime instance id.
+    if (target >= 100000) {
+        Instance* inst = hmget(runner->instancesById, target);
+        return RValue_makeReal((GMLReal)(inst != nullptr ? inst->instanceId : INSTANCE_NOONE));
+    }
+
+    // Object index: return first active instance of that object/descendant bucket.
+    if (target >= 0 && runner->dataWin->objt.count > (uint32_t)target) {
+        Instance** bucket = runner->instancesByObject[target];
+        int32_t bucketCount = (int32_t)arrlen(bucket);
+        for (int32_t i = 0; i < bucketCount; i++) {
+            Instance* inst = bucket[i];
+            if (inst != nullptr && inst->active) {
+                return RValue_makeReal((GMLReal)inst->instanceId);
+            }
+        }
+
+        // DELTARUNE's chapter loading screen expects the Switch async helper to exist.
+        // In the official runner it exists before obj_screen_loading checks it. If a
+        // chapter is entered directly or via our in-process game_change, create it lazily.
+        const char* objName = runner->dataWin->objt.objects[target].name;
+        if (objName != nullptr && (strstr(objName, "switchAsyncHelper") != nullptr || strstr(objName, "SwitchAsyncHelper") != nullptr)) {
+            Instance* inst = Runner_createInstance(runner, 0.0, 0.0, target);
+            if (inst != nullptr) {
+                fprintf(stderr, "VM: @@GetInstance@@ lazily created %s instance %d\n", objName, inst->instanceId);
+                // BSC_debugLog("vm-internal", "@@GetInstance@@ lazily created object=%s id=%d", objName, inst->instanceId);
+                return RValue_makeReal((GMLReal)inst->instanceId);
+            }
+        }
+    }
+
+    return RValue_makeReal(INSTANCE_NOONE);
 }
 
 static RValue builtin_instance_nearest(VMContext* ctx, RValue* args, int32_t argCount) {
@@ -8008,6 +8166,47 @@ static RValue builtin_draw_triangle(VMContext* ctx, RValue* args, MAYBE_UNUSED i
         float y3 = (float) RValue_toReal(args[5]);
         bool outline = (float) RValue_toBool(args[6]);
         runner->renderer->vtable->drawTriangle(runner->renderer, x1, y1, x2, y2, x3, y3, outline);
+    }
+    return RValue_makeUndefined();
+}
+
+
+// draw_triangle_color(x1, y1, x2, y2, x3, y3, col1, col2, col3, outline)
+// Compatibility fallback: Butterscotch renderer currently draws solid triangles.
+// This keeps games that call GameMaker's per-vertex colored triangle API running.
+static RValue builtin_draw_triangle_color(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    if (runner->renderer != nullptr) {
+        float x1 = (float) RValue_toReal(args[0]);
+        float y1 = (float) RValue_toReal(args[1]);
+        float x2 = (float) RValue_toReal(args[2]);
+        float y2 = (float) RValue_toReal(args[3]);
+        float x3 = (float) RValue_toReal(args[4]);
+        float y3 = (float) RValue_toReal(args[5]);
+        bool outline = RValue_toBool(args[9]);
+        runner->renderer->vtable->drawTriangle(runner->renderer, x1, y1, x2, y2, x3, y3, outline);
+    }
+    return RValue_makeUndefined();
+}
+
+// draw_ellipse(x1, y1, x2, y2, outline)
+// Compatibility fallback: draw an averaged-radius circle when ellipse drawing is unavailable.
+static RValue builtin_draw_ellipse(VMContext* ctx, RValue* args, MAYBE_UNUSED int32_t argCount) {
+    Runner* runner = ctx->runner;
+    if (runner->renderer != nullptr) {
+        float x1 = (float) RValue_toReal(args[0]);
+        float y1 = (float) RValue_toReal(args[1]);
+        float x2 = (float) RValue_toReal(args[2]);
+        float y2 = (float) RValue_toReal(args[3]);
+        bool outline = RValue_toBool(args[4]);
+
+        float cx = (x1 + x2) * 0.5f;
+        float cy = (y1 + y2) * 0.5f;
+        float rx = fabsf(x2 - x1) * 0.5f;
+        float ry = fabsf(y2 - y1) * 0.5f;
+        float r = (rx + ry) * 0.5f;
+
+        Renderer_drawCircle(runner->renderer, cx, cy, r, outline);
     }
     return RValue_makeUndefined();
 }
@@ -12035,6 +12234,277 @@ static RValue builtin_gpu_get_colorwriteenable(VMContext* ctx, MAYBE_UNUSED RVal
     return RValue_makeArray(out);
 }
 
+
+// ===[ SHADER COMPATIBILITY STUBS ]===
+// Deltarune's palette swap system asks for shader handles/uniforms even when
+// this runner is not using GameMaker's shader pipeline. Returning stable fake
+// ids lets scripts store them and continue. Calls that set uniforms can be no-ops.
+static int32_t gFakeShaderHandleNext = 1;
+
+typedef struct FakeShaderNameId { char* key; int32_t value; } FakeShaderNameId;
+static FakeShaderNameId* gFakeShaderIds = nullptr;
+
+static int32_t fakeShaderIdForName(const char* name) {
+    if (name == nullptr) name = "";
+    ptrdiff_t idx = shgeti(gFakeShaderIds, name);
+    if (idx >= 0) return gFakeShaderIds[idx].value;
+    char* key = safeStrdup(name);
+    int32_t id = gFakeShaderHandleNext++;
+    shput(gFakeShaderIds, key, id);
+    return id;
+}
+
+static RValue builtin_shader_get_uniform(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    char buf[256];
+    int32_t shader = (argCount >= 1) ? RValue_toInt32(args[0]) : 0;
+    char* name = (argCount >= 2) ? RValue_toString(args[1]) : safeStrdup("");
+    snprintf(buf, sizeof(buf), "u:%d:%s", shader, name ? name : "");
+    free(name);
+    return RValue_makeReal((GMLReal)fakeShaderIdForName(buf));
+}
+
+static RValue builtin_shader_get_sampler_index(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    char buf[256];
+    int32_t shader = (argCount >= 1) ? RValue_toInt32(args[0]) : 0;
+    char* name = (argCount >= 2) ? RValue_toString(args[1]) : safeStrdup("");
+    snprintf(buf, sizeof(buf), "s:%d:%s", shader, name ? name : "");
+    free(name);
+    return RValue_makeReal((GMLReal)fakeShaderIdForName(buf));
+}
+
+static RValue builtin_shader_set(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeUndefined(); }
+static RValue builtin_shader_reset(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeUndefined(); }
+static RValue builtin_shader_is_compiled(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeBool(true); }
+static RValue builtin_shader_set_uniform_f(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeUndefined(); }
+static RValue builtin_shader_set_uniform_f_array(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeUndefined(); }
+static RValue builtin_shader_set_uniform_i(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeUndefined(); }
+static RValue builtin_shader_set_uniform_i_array(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeUndefined(); }
+static RValue builtin_texture_set_stage(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) { return RValue_makeUndefined(); }
+
+// ===[ DS_PRIORITY FUNCTIONS ]===
+typedef struct DsPriorityItem { RValue value; double priority; } DsPriorityItem;
+typedef struct DsPriorityQueue { DsPriorityItem* items; bool freed; } DsPriorityQueue;
+static DsPriorityQueue* gDsPriorityPool = nullptr;
+
+static DsPriorityQueue* dsPriorityGet(int32_t id) {
+    if (id < 0 || id >= (int32_t)arrlen(gDsPriorityPool)) return nullptr;
+    if (gDsPriorityPool[id].freed) return nullptr;
+    return &gDsPriorityPool[id];
+}
+
+static int32_t dsPriorityFindMinIndex(DsPriorityQueue* q) {
+    if (q == nullptr || arrlen(q->items) <= 0) return -1;
+    int32_t best = 0;
+    for (int32_t i = 1; i < (int32_t)arrlen(q->items); i++) {
+        if (q->items[i].priority < q->items[best].priority) best = i;
+    }
+    return best;
+}
+
+static int32_t dsPriorityFindMaxIndex(DsPriorityQueue* q) {
+    if (q == nullptr || arrlen(q->items) <= 0) return -1;
+    int32_t best = 0;
+    for (int32_t i = 1; i < (int32_t)arrlen(q->items); i++) {
+        if (q->items[i].priority > q->items[best].priority) best = i;
+    }
+    return best;
+}
+
+static bool rvalueSoftEqual(RValue a, RValue b) {
+    if (a.type == RVALUE_STRING || b.type == RVALUE_STRING) {
+        char* as = RValue_toString(a);
+        char* bs = RValue_toString(b);
+        bool ok = (as && bs && strcmp(as, bs) == 0);
+        free(as); free(bs);
+        return ok;
+    }
+    return fabs(RValue_toReal(a) - RValue_toReal(b)) < 0.000001;
+}
+
+static RValue builtin_ds_priority_create(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    DsPriorityQueue q = {0};
+    int32_t id = (int32_t)arrlen(gDsPriorityPool);
+    arrput(gDsPriorityPool, q);
+    return RValue_makeReal((GMLReal)id);
+}
+
+static RValue builtin_ds_priority_destroy(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    DsPriorityQueue* q = dsPriorityGet(RValue_toInt32(args[0]));
+    if (!q) return RValue_makeUndefined();
+    for (int32_t i = 0; i < (int32_t)arrlen(q->items); i++) RValue_free(&q->items[i].value);
+    arrfree(q->items);
+    q->items = nullptr;
+    q->freed = true;
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_ds_priority_clear(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 1) return RValue_makeUndefined();
+    DsPriorityQueue* q = dsPriorityGet(RValue_toInt32(args[0]));
+    if (!q) return RValue_makeUndefined();
+    for (int32_t i = 0; i < (int32_t)arrlen(q->items); i++) RValue_free(&q->items[i].value);
+    arrfree(q->items);
+    q->items = nullptr;
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_ds_priority_size(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    DsPriorityQueue* q = (argCount >= 1) ? dsPriorityGet(RValue_toInt32(args[0])) : nullptr;
+    return RValue_makeReal(q ? (GMLReal)arrlen(q->items) : 0.0);
+}
+static RValue builtin_ds_priority_empty(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) { return RValue_makeBool(RValue_toInt32(builtin_ds_priority_size(ctx,args,argCount)) == 0); }
+
+static RValue builtin_ds_priority_add(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 3) return RValue_makeUndefined();
+    DsPriorityQueue* q = dsPriorityGet(RValue_toInt32(args[0]));
+    if (!q) return RValue_makeUndefined();
+    DsPriorityItem it;
+    it.value = RValue_makeIndependent(args[1]);
+    it.priority = RValue_toReal(args[2]);
+    arrput(q->items, it);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_ds_priority_find_min(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    DsPriorityQueue* q = (argCount >= 1) ? dsPriorityGet(RValue_toInt32(args[0])) : nullptr;
+    int32_t idx = dsPriorityFindMinIndex(q);
+    if (idx < 0) return RValue_makeUndefined();
+    return RValue_makeIndependent(q->items[idx].value);
+}
+static RValue builtin_ds_priority_find_max(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    DsPriorityQueue* q = (argCount >= 1) ? dsPriorityGet(RValue_toInt32(args[0])) : nullptr;
+    int32_t idx = dsPriorityFindMaxIndex(q);
+    if (idx < 0) return RValue_makeUndefined();
+    return RValue_makeIndependent(q->items[idx].value);
+}
+
+static RValue builtin_ds_priority_delete_min(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    DsPriorityQueue* q = (argCount >= 1) ? dsPriorityGet(RValue_toInt32(args[0])) : nullptr;
+    int32_t idx = dsPriorityFindMinIndex(q);
+    if (idx < 0) return RValue_makeUndefined();
+    RValue out = RValue_makeIndependent(q->items[idx].value);
+    RValue_free(&q->items[idx].value);
+    arrdel(q->items, idx);
+    return out;
+}
+static RValue builtin_ds_priority_delete_max(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    DsPriorityQueue* q = (argCount >= 1) ? dsPriorityGet(RValue_toInt32(args[0])) : nullptr;
+    int32_t idx = dsPriorityFindMaxIndex(q);
+    if (idx < 0) return RValue_makeUndefined();
+    RValue out = RValue_makeIndependent(q->items[idx].value);
+    RValue_free(&q->items[idx].value);
+    arrdel(q->items, idx);
+    return out;
+}
+
+static RValue builtin_ds_priority_delete_value(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeUndefined();
+    DsPriorityQueue* q = dsPriorityGet(RValue_toInt32(args[0]));
+    if (!q) return RValue_makeUndefined();
+    for (int32_t i = 0; i < (int32_t)arrlen(q->items); i++) {
+        if (rvalueSoftEqual(q->items[i].value, args[1])) {
+            RValue_free(&q->items[i].value);
+            arrdel(q->items, i);
+            return RValue_makeUndefined();
+        }
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_ds_priority_change_priority(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 3) return RValue_makeUndefined();
+    DsPriorityQueue* q = dsPriorityGet(RValue_toInt32(args[0]));
+    if (!q) return RValue_makeUndefined();
+    for (int32_t i = 0; i < (int32_t)arrlen(q->items); i++) {
+        if (rvalueSoftEqual(q->items[i].value, args[1])) {
+            q->items[i].priority = RValue_toReal(args[2]);
+            return RValue_makeUndefined();
+        }
+    }
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_ds_priority_find_priority(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount < 2) return RValue_makeUndefined();
+    DsPriorityQueue* q = dsPriorityGet(RValue_toInt32(args[0]));
+    if (!q) return RValue_makeUndefined();
+    for (int32_t i = 0; i < (int32_t)arrlen(q->items); i++) {
+        if (rvalueSoftEqual(q->items[i].value, args[1])) return RValue_makeReal((GMLReal)q->items[i].priority);
+    }
+    return RValue_makeUndefined();
+}
+
+
+// ===[ VIDEO BUILTINS ]===
+// Backed by src/video_system.c. Linux/glfw/sdl uses FFmpeg when found at CMake time.
+// Other platforms use a portable non-hanging fallback until they get a native decoder.
+
+static RValue builtin_video_open(VMContext* ctx, RValue* args, int32_t argCount) {
+    char* path = (argCount >= 1) ? RValue_toString(args[0]) : nullptr;
+    GMLReal result = VideoSystem_open(ctx->runner, path ? path : "");
+    free(path);
+    return RValue_makeReal(result);
+}
+
+static RValue builtin_video_close(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    VideoSystem_close();
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_video_draw(VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return VideoSystem_draw(ctx);
+}
+
+static RValue builtin_video_enable_loop(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    VideoSystem_enableLoop((argCount >= 1) ? RValue_toBool(args[0]) : false);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_video_is_looping(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeBool(VideoSystem_isLooping());
+}
+
+static RValue builtin_video_set_volume(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    VideoSystem_setVolume((argCount >= 1) ? RValue_toReal(args[0]) : 1.0);
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_video_get_volume(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(VideoSystem_getVolume());
+}
+
+static RValue builtin_video_get_format(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(VideoSystem_getFormat());
+}
+
+static RValue builtin_video_get_status(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(VideoSystem_getStatus());
+}
+
+static RValue builtin_video_pause(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    VideoSystem_pause();
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_video_resume(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    VideoSystem_resume();
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_video_seek_to(MAYBE_UNUSED VMContext* ctx, RValue* args, int32_t argCount) {
+    if (argCount >= 1) VideoSystem_seekTo(RValue_toReal(args[0]));
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_video_get_duration(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(VideoSystem_getDuration());
+}
+
+static RValue builtin_video_get_position(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeReal(VideoSystem_getPosition());
+}
+
 // ===[ REGISTRATION ]===
 
 void VMBuiltins_registerAll(VMContext* ctx) {
@@ -12197,6 +12667,21 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "parameter_string", builtin_parameter_string);
     VM_registerBuiltin(ctx, "game_change", builtin_game_change);
 
+    VM_registerBuiltin(ctx, "string_split", builtin_string_split);
+    VM_registerBuiltin(ctx, "audio_set_master_gain", builtin_audio_set_master_gain);
+    VM_registerBuiltin(ctx, "texturegroup_get_textures", builtin_texturegroup_get_textures);
+    VM_registerBuiltin(ctx, "window_enable_borderless_fullscreen", builtin_doNothing);
+    VM_registerBuiltin(ctx, "gpu_set_texfilter", builtin_doNothing);
+    VM_registerBuiltin(ctx, "camera_create", builtin_fake_resource_id);
+    VM_registerBuiltin(ctx, "vertex_create_buffer", builtin_fake_resource_id);
+    VM_registerBuiltin(ctx, "vertex_format_begin", builtin_doNothing);
+    VM_registerBuiltin(ctx, "vertex_format_add_position_3d", builtin_doNothing);
+    VM_registerBuiltin(ctx, "vertex_format_add_normal", builtin_doNothing);
+    VM_registerBuiltin(ctx, "vertex_format_add_colour", builtin_doNothing);
+    VM_registerBuiltin(ctx, "vertex_format_add_textcoord", builtin_doNothing);
+    VM_registerBuiltin(ctx, "vertex_format_add_texcoord", builtin_doNothing);
+    VM_registerBuiltin(ctx, "vertex_format_end", builtin_fake_resource_id);
+
     // ds_map
     VM_registerBuiltin(ctx, "ds_map_create", builtin_ds_map_create);
     VM_registerBuiltin(ctx, "ds_map_add", builtin_ds_map_add);
@@ -12237,6 +12722,21 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "ds_queue_write", builtin_ds_queue_write);
     VM_registerBuiltin(ctx, "ds_queue_read", builtin_ds_queue_read);
 
+
+    VM_registerBuiltin(ctx, "ds_priority_create", builtin_ds_priority_create);
+    VM_registerBuiltin(ctx, "ds_priority_destroy", builtin_ds_priority_destroy);
+    VM_registerBuiltin(ctx, "ds_priority_clear", builtin_ds_priority_clear);
+    VM_registerBuiltin(ctx, "ds_priority_size", builtin_ds_priority_size);
+    VM_registerBuiltin(ctx, "ds_priority_empty", builtin_ds_priority_empty);
+    VM_registerBuiltin(ctx, "ds_priority_add", builtin_ds_priority_add);
+    VM_registerBuiltin(ctx, "ds_priority_find_min", builtin_ds_priority_find_min);
+    VM_registerBuiltin(ctx, "ds_priority_find_max", builtin_ds_priority_find_max);
+    VM_registerBuiltin(ctx, "ds_priority_delete_min", builtin_ds_priority_delete_min);
+    VM_registerBuiltin(ctx, "ds_priority_delete_max", builtin_ds_priority_delete_max);
+    VM_registerBuiltin(ctx, "ds_priority_delete_value", builtin_ds_priority_delete_value);
+    VM_registerBuiltin(ctx, "ds_priority_change_priority", builtin_ds_priority_change_priority);
+    VM_registerBuiltin(ctx, "ds_priority_find_priority", builtin_ds_priority_find_priority);
+
     // Array
 
     VM_registerBuiltin(ctx, "array_length_1d", builtin_array_length_1d);
@@ -12275,6 +12775,8 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "audio_master_gain", builtin_audio_master_gain);
     VM_registerBuiltin(ctx, "audio_group_load", builtin_audio_group_load);
     VM_registerBuiltin(ctx, "audio_group_is_loaded", builtin_audio_group_is_loaded);
+    VM_registerBuiltin(ctx, "audio_group_set_gain", builtin_audio_group_set_gain);
+    VM_registerBuiltin(ctx, "audio_group_get_gain", builtin_audio_group_get_gain);
     VM_registerBuiltin(ctx, "audio_play_music", builtin_audio_play_music);
     VM_registerBuiltin(ctx, "audio_stop_music", builtin_audio_stop_music);
     VM_registerBuiltin(ctx, "audio_music_gain", builtin_audio_music_gain);
@@ -12541,6 +13043,9 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "draw_line_width_colour", builtin_draw_line_width_colour);
     VM_registerBuiltin(ctx, "draw_line_width_color", builtin_draw_line_width_colour);
     VM_registerBuiltin(ctx, "draw_triangle", builtin_draw_triangle);
+    VM_registerBuiltin(ctx, "draw_triangle_color", builtin_draw_triangle_color);
+    VM_registerBuiltin(ctx, "draw_triangle_colour", builtin_draw_triangle_color);
+    VM_registerBuiltin(ctx, "draw_ellipse", builtin_draw_ellipse);
     VM_registerBuiltin(ctx, "draw_circle", builtin_draw_circle);
     VM_registerBuiltin(ctx, "draw_set_circle_precision", builtin_draw_set_circle_precision);
     VM_registerBuiltin(ctx, "draw_get_circle_precision", builtin_draw_get_circle_precision);
@@ -12549,6 +13054,34 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "draw_get_color", builtin_draw_get_color);
     VM_registerBuiltin(ctx, "draw_get_alpha", builtin_draw_get_alpha);
     VM_registerBuiltin(ctx, "draw_get_font", builtin_draw_get_font);
+
+
+    VM_registerBuiltin(ctx, "shader_get_uniform", builtin_shader_get_uniform);
+    VM_registerBuiltin(ctx, "shader_get_sampler_index", builtin_shader_get_sampler_index);
+    VM_registerBuiltin(ctx, "shader_set", builtin_shader_set);
+    VM_registerBuiltin(ctx, "shader_reset", builtin_shader_reset);
+    VM_registerBuiltin(ctx, "shader_is_compiled", builtin_shader_is_compiled);
+    VM_registerBuiltin(ctx, "shader_set_uniform_f", builtin_shader_set_uniform_f);
+    VM_registerBuiltin(ctx, "shader_set_uniform_f_array", builtin_shader_set_uniform_f_array);
+    VM_registerBuiltin(ctx, "shader_set_uniform_i", builtin_shader_set_uniform_i);
+    VM_registerBuiltin(ctx, "shader_set_uniform_i_array", builtin_shader_set_uniform_i_array);
+    VM_registerBuiltin(ctx, "texture_set_stage", builtin_texture_set_stage);
+
+    // Video compatibility
+    VM_registerBuiltin(ctx, "video_open", builtin_video_open);
+    VM_registerBuiltin(ctx, "video_close", builtin_video_close);
+    VM_registerBuiltin(ctx, "video_draw", builtin_video_draw);
+    VM_registerBuiltin(ctx, "video_enable_loop", builtin_video_enable_loop);
+    VM_registerBuiltin(ctx, "video_is_looping", builtin_video_is_looping);
+    VM_registerBuiltin(ctx, "video_set_volume", builtin_video_set_volume);
+    VM_registerBuiltin(ctx, "video_get_volume", builtin_video_get_volume);
+    VM_registerBuiltin(ctx, "video_get_format", builtin_video_get_format);
+    VM_registerBuiltin(ctx, "video_get_status", builtin_video_get_status);
+    VM_registerBuiltin(ctx, "video_pause", builtin_video_pause);
+    VM_registerBuiltin(ctx, "video_resume", builtin_video_resume);
+    VM_registerBuiltin(ctx, "video_seek_to", builtin_video_seek_to);
+    VM_registerBuiltin(ctx, "video_get_duration", builtin_video_get_duration);
+    VM_registerBuiltin(ctx, "video_get_position", builtin_video_get_position);
 
     // Color
     VM_registerBuiltin(ctx, "merge_color", builtin_merge_color);

@@ -38,6 +38,10 @@ typedef struct {
     bool (*groupIsLoaded)(AudioSystem* audio, int32_t groupIndex);
     int32_t (*createStream)(AudioSystem* audio, const char* filename);
     bool (*destroyStream)(AudioSystem* audio, int32_t streamIndex);
+    // Hard backend reset used by in-process game_change. Must stop/uninit all
+    // backend objects without freeing the AudioSystem itself; Runner_create()
+    // will call init() again for the newly-loaded data.win.
+    void (*resetForGameChange)(AudioSystem* audio, DataWin* newDataWin, FileSystem* fileSystem);
 } AudioSystemVtable;
 
 // ===[ AudioSystem Base Struct ]===

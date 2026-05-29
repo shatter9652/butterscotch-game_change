@@ -1,4 +1,5 @@
 #include "ps2_file_system.h"
+#include "debug_log.h"
 #include "ps2_utils.h"
 #include "../json_reader.h"
 #include "../utils.h"
@@ -248,12 +249,16 @@ static void ensureParentDirectory(Ps2FileSystem* pfs, const char* path) {
 static char* resolvePath(FileSystem* fs, const char* relativePath) {
     Ps2FileSystem* pfs = (Ps2FileSystem*) fs;
     ptrdiff_t idx = shgeti(pfs->mappings, relativePath);
-    if (0 > idx)
+    if (0 > idx) {
+        BSC_debugLog("path-ps2", "resolvePath missing mapping relative=%s", relativePath);
         return nullptr;
+    }
 
     // Return the first mapped path
-    if (arrlen(pfs->mappings[idx].value) > 0)
+    if (arrlen(pfs->mappings[idx].value) > 0) {
+        BSC_debugLog("path-ps2", "resolvePath relative=%s full=%s", relativePath, pfs->mappings[idx].value[0]);
         return safeStrdup(pfs->mappings[idx].value[0]);
+    }
 
     return nullptr;
 }
@@ -280,8 +285,10 @@ static bool fileExists(FileSystem* fs, const char* relativePath) {
 static char* readFileText(FileSystem* fs, const char* relativePath) {
     Ps2FileSystem* pfs = (Ps2FileSystem*) fs;
     ptrdiff_t idx = shgeti(pfs->mappings, relativePath);
-    if (0 > idx)
+    if (0 > idx) {
+        BSC_debugLog("path-ps2", "resolvePath missing mapping relative=%s", relativePath);
         return nullptr;
+    }
 
     // For the PlayStation 2 target, we have multiple "search" paths for a specific file
     // The reason why we do this is because GameMaker allows files to be in two different folders: The save folder and the bundled folder
