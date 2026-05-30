@@ -250,9 +250,9 @@ GMLReal VideoSystem_open(Runner* runner, const char* relPath) {
     }
     gVideo.width = gVideo.codec->width;
     gVideo.height = gVideo.codec->height;
-    AVRational fr = gVideo.fmt->streams[gVideo.videoStream]->avg_frame_rate;
-    if (fr.num > 0 && fr.den > 0) gVideo.fps = av_q2d(fr);
-    if (gVideo.fps <= 1.0 || gVideo.fps > 240.0) gVideo.fps = 30.0;
+    // Deltarune's video/caption code assumes a stable 30 Hz timeline.
+    // Do not run the decoded MP4 at the host draw rate or at odd container rates.
+    gVideo.fps = 30.0;
     if (gVideo.fmt->duration > 0) gVideo.durationMs = (GMLReal)((double)gVideo.fmt->duration * 1000.0 / (double)AV_TIME_BASE);
 
     gVideo.frame = av_frame_alloc();
@@ -305,10 +305,9 @@ static bool decodeNextFrame(void) {
                 gVideo.runner->renderer->vtable->updateSurfaceRGBA(gVideo.runner->renderer, gVideo.surface, upload, gVideo.width, gVideo.height);
             }
             gVideo.decodedFirstFrame = true;
-            AVRational tb = gVideo.fmt->streams[gVideo.videoStream]->time_base;
-            int64_t pts = (gVideo.frame->best_effort_timestamp == AV_NOPTS_VALUE) ? gVideo.frame->pts : gVideo.frame->best_effort_timestamp;
-            if (pts != AV_NOPTS_VALUE) gVideo.positionMs = (GMLReal)(av_q2d(tb) * (double)pts * 1000.0);
-            else gVideo.positionMs += (GMLReal)(1000.0 / gVideo.fps);
+            // Position is wall-clock controlled by VideoSystem_draw().  Do not overwrite it
+            // with FFmpeg PTS here; doing so made some 29.97fps videos finish too early
+            // or too quickly when the runner's draw loop was faster than 30 Hz.
             return true;
         }
     }
@@ -331,8 +330,11 @@ static void VideoSystem_sendEndAsyncEvent(VMContext* ctx) {
     shput(*mapPtr, safeStrdup("status"), RValue_makeReal(1.0));
 
     runner->asyncLoadMapId = mapId;
-    /* Deltarune video callbacks are compiled as Other_70. */
-    Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ASYNC_VIDEO);
+    // GMS2 async system is normally 75, but some decompilers/exporters label
+    // DELTARUNE's couch-video handler as Other_70. Fire both; objects without
+    // one of the subevents simply ignore it.
+    Runner_executeEventForAll(runner, EVENT_OTHER, 70);
+    Runner_executeEventForAll(runner, EVENT_OTHER, OTHER_ASYNC_SYSTEM);
 
     mapPtr = &runner->dsMapPool[mapId];
     if (*mapPtr != nullptr) {
@@ -370,7 +372,7 @@ RValue VideoSystem_draw(VMContext* ctx) {
         // played too fast on 60fps displays.
         gVideo.positionMs += (GMLReal)(dt * 1000.0);
         gVideo.frameTimer += dt;
-        const double frameInterval = (gVideo.fps > 1.0) ? (1.0 / gVideo.fps) : (1.0 / 30.0);
+        const double frameInterval = 1.0 / 30.0;
         if (!gVideo.decodedFirstFrame || gVideo.frameTimer >= frameInterval) {
             if (gVideo.frameTimer >= frameInterval) gVideo.frameTimer -= frameInterval;
             if (!decodeNextFrame()) {

@@ -52,7 +52,6 @@
 #define OTHER_END_OF_PATH    8
 #define OTHER_NO_MORE_HEALTH 9
 #define OTHER_USER0          10
-#define OTHER_ASYNC_VIDEO    70
 #define OTHER_ASYNC_SYSTEM   75
 
 #define MAX_VIEWS 8

@@ -480,9 +480,9 @@ elseif(PLATFORM STREQUAL "ps2")
         target_link_directories(butterscotch PRIVATE $ENV{PS2SDK}/ee/lib $ENV{GSKIT}/lib)
         if(ENABLE_PS2_LIBMPEG_VIDEO)
             target_compile_definitions(butterscotch PRIVATE USE_PS2_LIBMPEG_VIDEO=1)
-            target_link_libraries(${AUDIO_LIBRARIES} butterscotch gskit dmakit audsrv mpeg pad mc kbd patches kernel c m)
+            target_link_libraries(butterscotch PRIVATE ${AUDIO_LIBRARIES} gskit dmakit audsrv mpeg pad mc kbd patches kernel c m)
         else()
-            target_link_libraries(${AUDIO_LIBRARIES} butterscotch gskit dmakit audsrv pad mc kbd patches kernel c m)
+            target_link_libraries(butterscotch PRIVATE ${AUDIO_LIBRARIES} gskit dmakit audsrv pad mc kbd patches kernel c m)
         endif()
 
         # Embed ps2sdk IRX modules (freesio2, freepad) as C arrays via bin2c
