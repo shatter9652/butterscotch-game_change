@@ -37,15 +37,15 @@ typedef struct VideoState {
     GMLReal volume;
     GMLReal durationMs;
     GMLReal positionMs;
-    double fps;
-    double frameTimer;
+    GMLReal fps;
+    GMLReal frameTimer;
     bool decodedFirstFrame;
     int width;
     int height;
     int surface;
     Runner* runner;
     char* path;
-    double lastClock;
+    GMLReal lastClock;
 #ifndef _WIN32
     pid_t audioPid;
 #endif
@@ -66,10 +66,10 @@ typedef struct VideoState {
 
 static VideoState gVideo = {0};
 
-static double nowSeconds(void) {
+static GMLReal nowSeconds(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1000000000.0;
+    return (GMLReal)ts.tv_sec + ((GMLReal)ts.tv_nsec / (GMLReal)1000000000.0f);
 }
 
 
@@ -128,9 +128,9 @@ void VideoSystem_close(void) {
     free(gVideo.path);
     memset(&gVideo, 0, sizeof(gVideo));
     gVideo.surface = -1;
-    gVideo.volume = 1.0;
-    gVideo.durationMs = 1000.0;
-    gVideo.fps = 30.0;
+    gVideo.volume = (GMLReal)1.0f;
+    gVideo.durationMs = (GMLReal)1000.0f;
+    gVideo.fps = (GMLReal)30.0f;
 }
 
 
@@ -184,15 +184,15 @@ static bool videoAllocSurface(Runner* runner, int w, int h) {
 GMLReal VideoSystem_open(Runner* runner, const char* relPath) {
     VideoSystem_close();
     gVideo.surface = -1;
-    gVideo.volume = 1.0;
-    gVideo.durationMs = 1000.0;
-    gVideo.fps = 30.0;
+    gVideo.volume = (GMLReal)1.0f;
+    gVideo.durationMs = (GMLReal)1000.0f;
+    gVideo.fps = (GMLReal)30.0f;
     gVideo.runner = runner;
     gVideo.open = true;
     gVideo.paused = false;
     gVideo.finished = false;
-    gVideo.positionMs = 0.0;
-    gVideo.frameTimer = 0.0;
+    gVideo.positionMs = (GMLReal)0.0f;
+    gVideo.frameTimer = (GMLReal)0.0f;
     gVideo.decodedFirstFrame = false;
     gVideo.lastClock = nowSeconds();
 
@@ -252,7 +252,7 @@ GMLReal VideoSystem_open(Runner* runner, const char* relPath) {
     gVideo.height = gVideo.codec->height;
     // Deltarune's video/caption code assumes a stable 30 Hz timeline.
     // Do not run the decoded MP4 at the host draw rate or at odd container rates.
-    gVideo.fps = 30.0;
+    gVideo.fps = (GMLReal)30.0f;
     if (gVideo.fmt->duration > 0) gVideo.durationMs = (GMLReal)((double)gVideo.fmt->duration * 1000.0 / (double)AV_TIME_BASE);
 
     gVideo.frame = av_frame_alloc();
@@ -356,31 +356,31 @@ RValue VideoSystem_draw(VMContext* ctx) {
         return makeVideoArray(1, gVideo.surface, -1);
     }
 
-    double t = nowSeconds();
+    GMLReal t = nowSeconds();
     if (!gVideo.paused) {
-        double dt = t - gVideo.lastClock;
-        if (dt < 0.0 || dt > 1.0) dt = 1.0 / gVideo.fps;
+        GMLReal dt = t - gVideo.lastClock;
+        if (dt < (GMLReal)0.0f || dt > (GMLReal)1.0f) dt = (GMLReal)1.0f / gVideo.fps;
 #ifndef USE_FFMPEG_VIDEO
-        gVideo.positionMs += (GMLReal)(dt * 1000.0);
+        gVideo.positionMs += (GMLReal)(dt * (GMLReal)1000.0f);
         if (gVideo.positionMs >= gVideo.durationMs) {
-            if (gVideo.loop) gVideo.positionMs = 0.0;
+            if (gVideo.loop) gVideo.positionMs = (GMLReal)0.0f;
             else gVideo.finished = true;
         }
 #else
         // Advance by wall clock, but only decode/upload frames at the video's FPS.
         // The previous version decoded one frame every draw call, so 29.97fps MP4s
         // played too fast on 60fps displays.
-        gVideo.positionMs += (GMLReal)(dt * 1000.0);
+        gVideo.positionMs += (GMLReal)(dt * (GMLReal)1000.0f);
         gVideo.frameTimer += dt;
-        const double frameInterval = 1.0 / 30.0;
+        const GMLReal frameInterval = (GMLReal)1.0f / (GMLReal)30.0f;
         if (!gVideo.decodedFirstFrame || gVideo.frameTimer >= frameInterval) {
             if (gVideo.frameTimer >= frameInterval) gVideo.frameTimer -= frameInterval;
             if (!decodeNextFrame()) {
                 if (gVideo.loop && gVideo.fmt) {
                     av_seek_frame(gVideo.fmt, gVideo.videoStream, 0, AVSEEK_FLAG_BACKWARD);
                     avcodec_flush_buffers(gVideo.codec);
-                    gVideo.positionMs = 0.0;
-                    gVideo.frameTimer = 0.0;
+                    gVideo.positionMs = (GMLReal)0.0f;
+                    gVideo.frameTimer = (GMLReal)0.0f;
                     gVideo.decodedFirstFrame = false;
                     decodeNextFrame();
                 } else {
@@ -403,7 +403,7 @@ bool VideoSystem_isLooping(void) { return gVideo.loop; }
 void VideoSystem_setVolume(GMLReal volume) {
     gVideo.volume = volume;
     if (gVideo.volume < 0.0) gVideo.volume = 0.0;
-    if (gVideo.volume > 1.0) gVideo.volume = 1.0;
+    if (gVideo.volume > 1.0) gVideo.volume = (GMLReal)1.0f;
 }
 GMLReal VideoSystem_getVolume(void) { return gVideo.volume; }
 GMLReal VideoSystem_getFormat(void) { return 0.0; }

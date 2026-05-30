@@ -12318,7 +12318,7 @@ static bool rvalueSoftEqual(RValue a, RValue b) {
         free(as); free(bs);
         return ok;
     }
-    return fabs(RValue_toReal(a) - RValue_toReal(b)) < 0.000001;
+    return fabsf((float)(RValue_toReal(a) - RValue_toReal(b))) < 0.000001f;
 }
 
 static RValue builtin_ds_priority_create(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
@@ -12439,6 +12439,54 @@ static RValue builtin_ds_priority_find_priority(MAYBE_UNUSED VMContext* ctx, RVa
 // ===[ VIDEO BUILTINS ]===
 // Backed by src/video_system.c. Linux/glfw/sdl uses FFmpeg when found at CMake time.
 // Other platforms use a portable non-hanging fallback until they get a native decoder.
+
+
+
+// date_current_datetime() -> GameMaker date serial (days since 1899-12-30).
+static RValue builtin_date_current_datetime(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    time_t now = time(NULL);
+    // Unix epoch 1970-01-01 is 25569 days after GameMaker's 1899-12-30 epoch.
+    GMLReal days = ((GMLReal)now / (GMLReal)86400.0f) + (GMLReal)25569.0f;
+    return RValue_makeReal(days);
+}
+
+// Minimal immediate-mode primitive compatibility used by DELTARUNE/UTY effects.
+// These no-op safely for now; textured primitive drawing is already handled elsewhere by video paths.
+static RValue builtin_draw_primitive_begin(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_primitive_begin_texture(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_vertex(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_vertex_texture(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_vertex_colour(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_vertex_color(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_vertex_texture_colour(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_vertex_texture_color(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
+
+static RValue builtin_draw_primitive_end(MAYBE_UNUSED VMContext* ctx, MAYBE_UNUSED RValue* args, MAYBE_UNUSED int32_t argCount) {
+    return RValue_makeUndefined();
+}
 
 static RValue builtin_video_open(VMContext* ctx, RValue* args, int32_t argCount) {
     char* path = (argCount >= 1) ? RValue_toString(args[0]) : nullptr;
@@ -12762,6 +12810,7 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "audio_system_is_available", builtin_audio_system_is_available);
     VM_registerBuiltin(ctx, "audio_exists", builtin_audio_exists);
     VM_registerBuiltin(ctx, "audio_channel_num", builtin_audio_channel_num);
+    VM_registerBuiltin(ctx, "date_current_datetime", builtin_date_current_datetime);
     VM_registerBuiltin(ctx, "audio_play_sound", builtin_audio_play_sound);
     VM_registerBuiltin(ctx, "audio_stop_sound", builtin_audio_stop_sound);
     VM_registerBuiltin(ctx, "audio_stop_all", builtin_audio_stop_all);
@@ -13043,6 +13092,15 @@ void VMBuiltins_registerAll(VMContext* ctx) {
     VM_registerBuiltin(ctx, "draw_line_width_colour", builtin_draw_line_width_colour);
     VM_registerBuiltin(ctx, "draw_line_width_color", builtin_draw_line_width_colour);
     VM_registerBuiltin(ctx, "draw_triangle", builtin_draw_triangle);
+    VM_registerBuiltin(ctx, "draw_primitive_begin", builtin_draw_primitive_begin);
+    VM_registerBuiltin(ctx, "draw_primitive_begin_texture", builtin_draw_primitive_begin_texture);
+    VM_registerBuiltin(ctx, "draw_vertex", builtin_draw_vertex);
+    VM_registerBuiltin(ctx, "draw_vertex_texture", builtin_draw_vertex_texture);
+    VM_registerBuiltin(ctx, "draw_vertex_colour", builtin_draw_vertex_colour);
+    VM_registerBuiltin(ctx, "draw_vertex_color", builtin_draw_vertex_color);
+    VM_registerBuiltin(ctx, "draw_vertex_texture_colour", builtin_draw_vertex_texture_colour);
+    VM_registerBuiltin(ctx, "draw_vertex_texture_color", builtin_draw_vertex_texture_color);
+    VM_registerBuiltin(ctx, "draw_primitive_end", builtin_draw_primitive_end);
     VM_registerBuiltin(ctx, "draw_triangle_color", builtin_draw_triangle_color);
     VM_registerBuiltin(ctx, "draw_triangle_colour", builtin_draw_triangle_color);
     VM_registerBuiltin(ctx, "draw_ellipse", builtin_draw_ellipse);
